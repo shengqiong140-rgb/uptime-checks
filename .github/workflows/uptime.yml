@@ -1,0 +1,49 @@
+# 每日外部存活探测：五个线上 app 合在这一个**公开**仓库里跑（公开仓的 Actions 分钟不计费）。
+# 2026-11-25 从各私有仓的 uptime.yml 搬来：私有仓月额度用完、5 份每天各自按 1 分钟起算。
+# 日志公开 → 只打状态码和断言结果，不打 health 响应体。
+# 失败 = 那一个 app 的 job 红 → GitHub 发邮件给仓库主人。
+# ⚠️ GitHub 会把 60 天没提交的仓库的 schedule 自动停掉；长假后回来手动跑一次看它还活着。
+name: uptime
+on:
+  schedule:
+    - cron: '19 23 * * *'   # 新加坡早上 7 点多，分钟避开整点洪峰
+  workflow_dispatch:
+concurrency: { group: uptime, cancel-in-progress: true }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: shizi
+            url: https://shizi.onechineseedu.com/api/health
+            check: 'j["db"]=="ok" and all(j["threads"].values())'
+          - app: english-spelling
+            url: https://spelling.onechineseedu.com/health
+            check: 'True'
+          - app: question-bank
+            url: https://question-bank-production-7093.up.railway.app/api/health
+            check: 'j["status"]=="ok"'
+          - app: auth-kit
+            url: https://login.onechineseedu.com/health
+            check: 'j["db"]=="ok"'
+          - app: compre-compo
+            url: https://compre-compo-production.up.railway.app/health
+            check: 'True'
+    name: ${{ matrix.app }}
+    steps:
+      - name: 打 health（三次都失败才算挂）
+        env: { URL: '${{ matrix.url }}', CHECK: '${{ matrix.check }}', APP: '${{ matrix.app }}' }
+        run: |
+          for i in 1 2 3; do
+            BODY=$(curl -sS --max-time 20 -w '\n%{http_code}' "$URL" 2>/dev/null) && CODE=$(echo "$BODY" | tail -1) || CODE=000
+            PAYLOAD=$(echo "$BODY" | sed '$d')
+            if [ "$CODE" = "200" ] && echo "$PAYLOAD" | python3 -c "import sys,json; j=json.load(sys.stdin) if '$CHECK'!='True' else None; assert $CHECK" 2>/dev/null; then
+              echo "✅ $APP 第 $i 次 200，检查通过"; exit 0
+            fi
+            echo "第 $i 次: HTTP $CODE（检查没过）"; [ "$i" -lt 3 ] && sleep 20
+          done
+          echo "::error::$APP 健康检查连续三次失败（最后一次 HTTP $CODE）。503 = 库写不进；000/502/504 = 服务没起来，Railway 连崩三次会放弃重启，去 dashboard 看。"
+          exit 1
